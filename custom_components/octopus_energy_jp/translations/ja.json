@@ -15,17 +15,25 @@
         "data": {
           "account_number": "アカウント番号"
         }
+      },
+      "reauth_confirm": {
+        "title": "パスワードの再入力",
+        "description": "{email} の保存済みパスワードが使えなくなりました。octopusenergy.co.jp の現在のパスワードを入力してください。",
+        "data": {
+          "password": "パスワード"
+        }
       }
     },
     "error": {
       "invalid_auth": "メールアドレスまたはパスワードが正しくありません。",
       "cannot_connect": "Octopus Energy Japan のサーバーに接続できませんでした。しばらくしてから再度お試しください。",
       "no_accounts": "このログイン情報に紐づくアカウントが見つかりませんでした。",
-      "unknown": "不明なエラーが発生しました。Home Assistant のログを確認してください。"
+      "unknown": "不明なエラーが発生しました。Home Assistant のログを確認してください。",
+      "rate_limited": "Octopus Energy のサーバーが、このネットワークからのリクエストを一時的にブロックしています。しばらく待ってから再度お試しください。"
     },
     "abort": {
-      "already_configured": "このアカウントはすでに設定済みです。"
+      "already_configured": "このアカウントはすでに設定済みです。",
+      "reauth_successful": "パスワードを更新しました。"
     }
   }
 }
-

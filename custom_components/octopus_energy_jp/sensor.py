@@ -139,11 +139,33 @@ class OctopusJapanBaseSensor(CoordinatorEntity[OctopusJapanDataUpdateCoordinator
 
 
 
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _enum_value(value: str | None, options: list[str]) -> str | None:
+    """Lower-case an enum from Kraken; None for values HA wasn't told about
+    (an ENUM sensor reporting an unlisted option raises an error)."""
+    if not value:
+        return None
+    value = value.lower()
+    return value if value in options else None
+
+
 class OctopusJapanLatestConsumptionSensor(OctopusJapanBaseSensor):
-    """The most recent completed half-hourly consumption reading (kWh)."""
+    """The most recent completed half-hourly consumption reading (kWh).
+
+    No state_class: the value goes up and down every half hour, so neither
+    TOTAL nor TOTAL_INCREASING describes it, and recorder's sums for it
+    would be meaningless.
+    """
 
     _attr_device_class = SensorDeviceClass.ENERGY
-    _attr_state_class = SensorStateClass.TOTAL
     _attr_native_unit_of_measurement = "kWh"
     _attr_name = "Latest Half-Hourly Consumption"
 
@@ -156,7 +178,7 @@ class OctopusJapanLatestConsumptionSensor(OctopusJapanBaseSensor):
         reading = self.coordinator.data.get("latest_reading")
         if not reading:
             return None
-        return float(reading["value"])
+        return _float_or_none(reading.get("value"))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -170,10 +192,10 @@ class OctopusJapanLatestConsumptionSensor(OctopusJapanBaseSensor):
 
 
 class OctopusJapanLatestCostEstimateSensor(OctopusJapanBaseSensor):
-    """Estimated cost (JPY) corresponding to the latest half-hourly consumption."""
+    """Estimated cost (JPY) corresponding to the latest half-hourly
+    consumption. No state_class, same reasoning as the consumption one."""
 
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_state_class = SensorStateClass.TOTAL
     _attr_native_unit_of_measurement = "JPY"
     _attr_name = "Latest Half-Hourly Cost Estimate"
 
@@ -186,7 +208,7 @@ class OctopusJapanLatestCostEstimateSensor(OctopusJapanBaseSensor):
         reading = self.coordinator.data.get("latest_reading")
         if not reading:
             return None
-        return float(reading["costEstimate"])
+        return _float_or_none(reading.get("costEstimate"))
 
 
 class OctopusJapanTodayConsumptionSensor(OctopusJapanBaseSensor):
@@ -336,15 +358,17 @@ class OctopusJapanMonthCostEstimateSensor(OctopusJapanBaseSensor):
 
 
 class OctopusJapanTotalConsumptionSensor(OctopusJapanBaseSensor):
-    """Cumulative consumption since this integration started tracking
-    (same number as the long-term statistics `sum`).
+    """Cumulative consumption since the contract start (same number as the
+    external statistics' latest `sum`, summed across meters).
 
-    state_class=TOTAL_INCREASING, so besides viewing the history graph
-    directly, this entity can be selected as the source under Settings ->
-    Dashboards -> Energy -> Grid consumption, without needing to find the
-    more hidden `octopus_energy_jp:<account>_<spin>_consumption` external
-    statistic entry (both should have identical values; this is just a
-    more convenient entry point).
+    For the Energy Dashboard, prefer the external statistic
+    `octopus_energy_jp:<account>_<spin>_consumption`: it records each
+    hour's usage at the time it happened, whereas recorder's statistics for
+    this entity book it at the time the (hours-late) meter data arrived.
+
+    Unknown while the statistics are still catching up (first backfill), so
+    recorder takes the full total as its starting point instead of counting
+    the backfilled history as new consumption.
     """
 
     _attr_device_class = SensorDeviceClass.ENERGY
@@ -357,13 +381,15 @@ class OctopusJapanTotalConsumptionSensor(OctopusJapanBaseSensor):
         return f"{self._account_number}_total_consumption"
 
     @property
-    def native_value(self) -> float:
-        return round(self.coordinator.data.get("total_consumption_kwh", 0.0), 3)
+    def native_value(self) -> float | None:
+        value = self.coordinator.data.get("total_consumption_kwh")
+        return round(value, 3) if value is not None else None
 
 
 class OctopusJapanTotalCostSensor(OctopusJapanBaseSensor):
-    """Cumulative estimated cost since this integration started tracking;
-    usable as the source for the Energy Dashboard's "track costs".
+    """Cumulative estimated cost since the contract start. Same caveats as
+    Total Consumption; prefer the `..._cost` external statistic for the
+    Energy Dashboard's "track costs".
 
     Unlike Total Consumption, this can't use TOTAL_INCREASING -- HA
     requires device_class=MONETARY to use state_class=TOTAL only. This
@@ -381,8 +407,9 @@ class OctopusJapanTotalCostSensor(OctopusJapanBaseSensor):
         return f"{self._account_number}_total_cost"
 
     @property
-    def native_value(self) -> float:
-        return round(self.coordinator.data.get("total_cost_jpy", 0.0), 2)
+    def native_value(self) -> float | None:
+        value = self.coordinator.data.get("total_cost_jpy")
+        return round(value, 2) if value is not None else None
 
 
 class OctopusJapanBalanceSensor(OctopusJapanBaseSensor):
@@ -453,8 +480,7 @@ class OctopusJapanAccountStatusSensor(OctopusJapanBaseSensor):
 
     @property
     def native_value(self) -> str | None:
-        status = self.coordinator.data.get("account_status")
-        return status.lower() if status else None
+        return _enum_value(self.coordinator.data.get("account_status"), ACCOUNT_STATUS_OPTIONS)
 
 
 class OctopusJapanSupplyStatusSensor(OctopusJapanBaseSensor):
@@ -479,8 +505,7 @@ class OctopusJapanSupplyStatusSensor(OctopusJapanBaseSensor):
         supply_point = self.coordinator.data.get("primary_supply_point")
         if not supply_point:
             return None
-        status = supply_point.get("status")
-        return status.lower() if status else None
+        return _enum_value(supply_point.get("status"), SUPPLY_STATUS_OPTIONS)
 
 
 class OctopusJapanContractedCapacitySensor(OctopusJapanBaseSensor):

@@ -15,16 +15,25 @@
         "data": {
           "account_number": "账户号"
         }
+      },
+      "reauth_confirm": {
+        "title": "重新输入密码",
+        "description": "{email} 保存的密码已失效，请输入 octopusenergy.co.jp 的当前密码。",
+        "data": {
+          "password": "密码"
+        }
       }
     },
     "error": {
       "invalid_auth": "邮箱或密码不正确，请检查后重试。",
       "cannot_connect": "无法连接到 Octopus Energy Japan 服务器，请稍后重试。",
       "no_accounts": "该账号下没有找到任何电力账户。",
-      "unknown": "发生未知错误，请查看 Home Assistant 日志。"
+      "unknown": "发生未知错误，请查看 Home Assistant 日志。",
+      "rate_limited": "Octopus Energy 服务器暂时拦截了来自当前网络的请求，请稍等一段时间后重试。"
     },
     "abort": {
-      "already_configured": "该账户已经配置过。"
+      "already_configured": "该账户已经配置过。",
+      "reauth_successful": "密码已更新。"
     }
   }
 }
