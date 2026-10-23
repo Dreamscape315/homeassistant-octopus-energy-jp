@@ -25,7 +25,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     account_number = entry.data[CONF_ACCOUNT_NUMBER]
 
-    coordinator = OctopusJapanDataUpdateCoordinator(hass, client, account_number)
+    coordinator = OctopusJapanDataUpdateCoordinator(hass, entry, client, account_number)
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator

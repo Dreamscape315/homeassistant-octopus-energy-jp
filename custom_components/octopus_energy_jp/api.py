@@ -18,18 +18,28 @@ octopusenergy.co.jp).
 
     All subsequent requests carry an `Authorization: JWT <token>` header
     (note the "JWT " prefix -- not a bare token).
+
+The API sits behind AWS CloudFront. When it decides a client is sending too
+many requests it answers with an HTTP 403 *HTML* page (not a GraphQL JSON
+error), which has nothing to do with the credentials. All requests go
+through one shared gate (`_RequestGate`) that spaces them out and, after
+such a block, pauses every request for a cooldown period.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aiohttp
 
 from .const import (
+    COOLDOWN_STEPS_SECONDS,
     GRAPHQL_URL,
+    MIN_REQUEST_INTERVAL_SECONDS,
     TOKEN_ASSUMED_LIFETIME_MINUTES,
 )
 
@@ -42,6 +52,71 @@ class OctopusJapanApiError(Exception):
 
 class OctopusJapanAuthError(OctopusJapanApiError):
     """Auth-related error: invalid email/password, expired token, etc."""
+
+
+class OctopusJapanTransientError(OctopusJapanApiError):
+    """Timeout, connection failure or 5xx; worth retrying later."""
+
+
+class OctopusJapanRateLimitError(OctopusJapanApiError):
+    """The API blocked or throttled us (WAF 403 page, HTTP 429), or we are
+    still inside the cooldown that followed such a block."""
+
+    def __init__(self, message: str, retry_at: datetime) -> None:
+        super().__init__(message)
+        self.retry_at = retry_at
+
+
+class _RequestGate:
+    """Serializes and spaces out every API request in this process, and
+    holds the cooldown after a block.
+
+    Module-level on purpose: all accounts share the same public IP (a WAF
+    block applies to all of them), and the state must survive Home
+    Assistant re-creating the client when it retries a failed setup.
+    """
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self._last_request = 0.0
+        self._blocked_until: datetime | None = None
+        self._cooldown_level = 0
+
+    async def async_wait_turn(self) -> None:
+        """Call with `lock` held, right before sending a request."""
+        self.raise_if_cooling_down()
+        wait = MIN_REQUEST_INTERVAL_SECONDS - (time.monotonic() - self._last_request)
+        if wait > 0:
+            await asyncio.sleep(wait)
+
+    def mark_request_done(self) -> None:
+        self._last_request = time.monotonic()
+
+    def raise_if_cooling_down(self) -> None:
+        if self._blocked_until and datetime.now(timezone.utc) < self._blocked_until:
+            raise OctopusJapanRateLimitError(
+                "Octopus Energy API requests are paused until "
+                f"{self._blocked_until.isoformat(timespec='seconds')} after being blocked",
+                self._blocked_until,
+            )
+
+    def enter_cooldown(self) -> datetime:
+        delay = COOLDOWN_STEPS_SECONDS[min(self._cooldown_level, len(COOLDOWN_STEPS_SECONDS) - 1)]
+        self._cooldown_level += 1
+        self._blocked_until = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        return self._blocked_until
+
+    def record_success(self) -> None:
+        self._cooldown_level = 0
+        self._blocked_until = None
+
+
+_GATE = _RequestGate()
+
+
+def async_enter_cooldown() -> datetime:
+    """Pause all API requests (used after repeated transient failures)."""
+    return _GATE.enter_cooldown()
 
 
 TOKEN_MUTATION = """
@@ -328,26 +403,77 @@ class OctopusJapanApiClient:
         *,
         require_auth: bool = True,
     ) -> dict[str, Any]:
+        if not require_auth:
+            return await self._async_post(query, variables, None)
+
+        token = await self._async_ensure_token()
+        try:
+            return await self._async_post(query, variables, token)
+        except OctopusJapanAuthError:
+            # The token may have expired early or been revoked: log in again
+            # once. If the credentials themselves are wrong, the login raises
+            # OctopusJapanAuthError and that propagates.
+            _LOGGER.debug("Token rejected, logging in again")
+            self._token = None
+            return await self._async_post(query, variables, await self._async_ensure_token())
+
+    async def _async_post(
+        self, query: str, variables: dict[str, Any] | None, token: str | None
+    ) -> dict[str, Any]:
         headers = {"Content-Type": "application/json"}
-        if require_auth:
+        if token is not None:
             # Kraken requires the Authorization header format "JWT <token>",
             # not a bare token (verified, see caru-ini/octopus-bot).
-            headers["Authorization"] = f"JWT {await self._async_ensure_token()}"
+            headers["Authorization"] = f"JWT {token}"
+
+        async with _GATE.lock:
+            await _GATE.async_wait_turn()
+            try:
+                async with self._session.post(
+                    GRAPHQL_URL,
+                    json={"query": query, "variables": variables or {}},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    status = resp.status
+                    content_type = resp.content_type
+                    body = await resp.text()
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                raise OctopusJapanTransientError(
+                    f"Failed to connect to Octopus Energy server: {err!r}"
+                ) from err
+            finally:
+                _GATE.mark_request_done()
+
+        if status == 429 or (status == 403 and content_type != "application/json") or (
+            content_type == "text/html"
+        ):
+            # Not a GraphQL answer: CloudFront/WAF refused the request.
+            retry_at = _GATE.enter_cooldown()
+            _LOGGER.warning(
+                "Octopus Energy API blocked the request (HTTP %s, %s); pausing all requests until %s",
+                status,
+                content_type,
+                retry_at.isoformat(timespec="seconds"),
+            )
+            _LOGGER.debug("Blocked response body: %s", body[:500])
+            raise OctopusJapanRateLimitError(
+                f"Blocked by the Octopus Energy API (HTTP {status})", retry_at
+            )
+        if status >= 500:
+            raise OctopusJapanTransientError(f"Octopus Energy server error (HTTP {status})")
+        if status in (401, 403):
+            raise OctopusJapanAuthError(f"Authentication failed (HTTP {status})")
 
         try:
-            async with self._session.post(
-                GRAPHQL_URL,
-                json={"query": query, "variables": variables or {}},
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status >= 500:
-                    raise OctopusJapanApiError(f"Octopus Energy server error (HTTP {resp.status})")
-                if resp.status in (401, 403):
-                    raise OctopusJapanAuthError(f"Authentication failed (HTTP {resp.status})")
-                payload = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            raise OctopusJapanApiError(f"Failed to connect to Octopus Energy server: {err}") from err
+            payload = json.loads(body)
+        except ValueError as err:
+            _LOGGER.debug("Unexpected response body: %s", body[:500])
+            raise OctopusJapanApiError(
+                f"Unexpected non-JSON response (HTTP {status}, {content_type})"
+            ) from err
+
+        _GATE.record_success()
 
         if "errors" in payload and payload["errors"]:
             err = payload["errors"][0]
@@ -361,6 +487,9 @@ class OctopusJapanApiClient:
                 raise OctopusJapanAuthError(f"Login failed: {message}")
             if "Authorization" in message and "header" in message:
                 raise OctopusJapanAuthError(f"Missing or invalid Authorization header: {message}")
+            if "too many requests" in message.lower() or "rate limit" in message.lower():
+                retry_at = _GATE.enter_cooldown()
+                raise OctopusJapanRateLimitError(f"{code}: {message}", retry_at)
 
             raise OctopusJapanApiError(f"{code}: {message}")
 
