@@ -10,11 +10,35 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import OctopusJapanApiClient
 from .const import CONF_ACCOUNT_NUMBER, DOMAIN
-from .coordinator import OctopusJapanDataUpdateCoordinator
+from .coordinator import OctopusJapanDataUpdateCoordinator, async_clear_external_statistics
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate config entries created by older versions.
+
+    1.1 -> 1.2: statistics written before 0.1.2 may start later than the
+    contract (early versions backfilled only 30 days) or miss the second
+    half of some hours, and later syncs only revisit the last 48 hours.
+    Delete them once; the first sync rebuilds them from the contract start
+    (and resumes from the last written chunk if interrupted).
+    """
+    if entry.version > 1:
+        return False
+
+    if entry.minor_version < 2:
+        cleared = await async_clear_external_statistics(hass, entry.data[CONF_ACCOUNT_NUMBER])
+        if cleared:
+            _LOGGER.info(
+                "Rebuilding Energy Dashboard statistics written by an older version: %s",
+                ", ".join(cleared),
+            )
+        hass.config_entries.async_update_entry(entry, minor_version=2)
+
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

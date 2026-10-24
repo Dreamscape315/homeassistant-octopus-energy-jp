@@ -36,6 +36,8 @@ class OctopusEnergyJapanConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handles the config flow for Octopus Energy Japan."""
 
     VERSION = 1
+    # 2: statistics are rebuilt from the contract start (see async_migrate_entry)
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         self._email: str | None = None
