@@ -32,6 +32,7 @@ from homeassistant.components.recorder.models import StatisticData, StatisticMet
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    list_statistic_ids,
     statistics_during_period,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -103,6 +104,23 @@ def start_of_local_month(reference: datetime | None = None) -> datetime:
     """Start of "this month" in the local timezone (the 1st, 00:00)."""
     today = dt_util.start_of_local_day(reference)
     return today.replace(day=1)
+
+
+async def async_clear_external_statistics(hass: HomeAssistant, account_number: str) -> list[str]:
+    """Delete every external statistic this integration wrote for an account.
+
+    Used once when upgrading from versions before 0.1.2, whose statistics
+    may start later than the contract or miss half hours; the next sync
+    then rebuilds them from the contract start like a fresh install.
+    """
+    prefix = f"{DOMAIN}:{_slugify(account_number)}_"
+    existing = await get_instance(hass).async_add_executor_job(
+        list_statistic_ids, hass, None, "sum"
+    )
+    statistic_ids = [s["statistic_id"] for s in existing if s["statistic_id"].startswith(prefix)]
+    if statistic_ids:
+        get_instance(hass).async_clear_statistics(statistic_ids)
+    return statistic_ids
 
 
 def _aggregate_hourly(
